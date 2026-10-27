@@ -1,0 +1,40 @@
+﻿name: Build Android APK
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libsqlite3-dev ccache lldb
+        sudo apt-get install -y build-essential ccache git libffi-dev libssl-dev
+        pip install --upgrade pip
+        pip install buildozer cython virtualenv
+
+    - name: Build with Buildozer
+      run: |
+        # Команда сборки APK в режиме релиза/отладки
+        buildozer android debug
+      env:
+        BUILDOZER_WARN_ON_ROOT: 0
+
+    - name: Upload APK Artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: aihub-mobile-apk
+        path: bin/*.apk

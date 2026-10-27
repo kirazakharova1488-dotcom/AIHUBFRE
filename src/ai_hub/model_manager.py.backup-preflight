@@ -1,0 +1,117 @@
+"""Local Ollama model management."""
+
+from __future__ import annotations
+
+import json
+from collections.abc import Iterator
+
+import httpx
+from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn, TextColumn
+
+from ai_hub.config import settings
+from ai_hub.utils.console import console
+
+
+def _base_url() -> str:
+    return settings.ollama_host.rstrip("/")
+
+
+def _read_json_lines(lines: Iterator[str]) -> Iterator[dict]:
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"Invalid response from Ollama: {line[:200]}") from exc
+        if isinstance(data, dict):
+            if data.get("error"):
+                raise RuntimeError(str(data["error"]))
+            yield data
+
+
+def format_bytes(size: int | float | None) -> str:
+    value = float(size or 0)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if value < 1024 or unit == "TB":
+            return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
+        value /= 1024
+    return f"{value:.1f} TB"
+
+
+def list_models() -> list[dict]:
+    """Return installed Ollama models."""
+    try:
+        response = httpx.get(
+            f"{_base_url()}/api/tags",
+            timeout=settings.ollama_timeout,
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        raise RuntimeError(f"Cannot retrieve local models: {exc}") from exc
+
+    models = payload.get("models", [])
+    return sorted(models, key=lambda item: str(item.get("name", "")).lower())
+
+
+def pull_model(name: str) -> None:
+    """Download a model while displaying Ollama's reported progress."""
+    name = name.strip()
+    if not name:
+        raise ValueError("Model name cannot be empty.")
+
+    console.print(f"\n[bold cyan]Downloading model:[/bold cyan] {name}")
+    try:
+        with httpx.stream(
+            "POST",
+            f"{_base_url()}/api/pull",
+            json={"name": name, "stream": True},
+            timeout=None,
+        ) as response:
+            response.raise_for_status()
+            with Progress(
+                SpinnerColumn(style="cyan"),
+                TextColumn("[bold]{task.description}"),
+                BarColumn(),
+                TaskProgressColumn(),
+                console=console,
+            ) as progress:
+                task_id = progress.add_task("Connecting to Ollama...", total=None)
+                for item in _read_json_lines(response.iter_lines()):
+                    status = str(item.get("status", "Working..."))
+                    total = item.get("total")
+                    completed = item.get("completed")
+                    if isinstance(total, (int, float)) and total > 0:
+                        progress.update(
+                            task_id,
+                            description=status,
+                            total=total,
+                            completed=min(completed or 0, total),
+                        )
+                    else:
+                        progress.update(task_id, description=status)
+    except httpx.HTTPError as exc:
+        raise RuntimeError(f"Model download failed: {exc}") from exc
+
+    console.print(f"[bold green]Model ready:[/bold green] {name}")
+
+
+def delete_model(name: str) -> None:
+    """Delete an installed Ollama model."""
+    name = name.strip()
+    if not name:
+        raise ValueError("Model name cannot be empty.")
+
+    try:
+        response = httpx.post(
+            f"{_base_url()}/api/delete",
+            json={"name": name},
+            timeout=settings.ollama_timeout,
+        )
+        response.raise_for_status()
+    except httpx.HTTPError as exc:
+        detail = ""
+        if isinstance(exc, httpx.HTTPStatusError):
+            detail = f" ? {exc.response.text[:300]}"
+        raise RuntimeError(f"Could not delete {name}: {exc}{detail}") from exc

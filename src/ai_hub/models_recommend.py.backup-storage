@@ -1,0 +1,228 @@
+﻿from pathlib import Path
+import os
+import subprocess
+
+import httpx
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
+
+console = Console()
+
+
+def get_ram_gb():
+    """Return total and available system RAM in GiB."""
+    try:
+        if os.name == "nt":
+            import ctypes
+
+            class MEMORYSTATUSEX(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+
+            status = MEMORYSTATUSEX()
+            status.dwLength = ctypes.sizeof(status)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+                return (
+                    status.ullTotalPhys / (1024 ** 3),
+                    status.ullAvailPhys / (1024 ** 3),
+                )
+        else:
+            import psutil
+            memory = psutil.virtual_memory()
+            return memory.total / (1024 ** 3), memory.available / (1024 ** 3)
+    except Exception:
+        pass
+    return None, None
+
+
+def get_gpu():
+    """Read NVIDIA GPU name and VRAM using nvidia-smi."""
+    try:
+        result = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=name,memory.total,memory.used",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=True,
+        )
+        gpus = []
+        for line in result.stdout.strip().splitlines():
+            parts = [part.strip() for part in line.split(",")]
+            if len(parts) >= 3:
+                gpus.append({
+                    "name": parts[0],
+                    "total": float(parts[1]) / 1024,
+                    "used": float(parts[2]) / 1024,
+                })
+        return gpus
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return []
+
+
+def get_ollama_models():
+    """Fetch locally installed models from Ollama."""
+    host = os.getenv("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
+    if "://" not in host:
+        host = "http://" + host
+    try:
+        response = httpx.get(f"{host}/api/tags", timeout=5)
+        response.raise_for_status()
+        return response.json().get("models", []), None
+    except Exception as exc:
+        return [], str(exc)
+
+
+def recommend_models(vram_available, ram_available):
+    """Return approximate model-fit recommendations, not guarantees."""
+    catalog = [
+        {
+            "name": "qwen2.5:3b",
+            "vram": 3.0,
+            "ram": 5.0,
+            "use": "Быстрый помощник, повседневные задачи",
+        },
+        {
+            "name": "gemma3:4b",
+            "vram": 4.0,
+            "ram": 6.0,
+            "use": "Универсальный помощник",
+        },
+        {
+            "name": "qwen2.5:7b",
+            "vram": 6.0,
+            "ram": 9.0,
+            "use": "Код, анализ и сложные запросы",
+        },
+        {
+            "name": "llama3.1:8b",
+            "vram": 7.0,
+            "ram": 10.0,
+            "use": "Общение и универсальные задачи",
+        },
+        {
+            "name": "qwen2.5:14b",
+            "vram": 10.0,
+            "ram": 18.0,
+            "use": "Более сложные задачи; возможна работа через RAM",
+        },
+    ]
+
+    result = []
+    for item in catalog:
+        gpu_ok = vram_available is not None and vram_available >= item["vram"]
+        ram_ok = ram_available is not None and ram_available >= item["ram"]
+        if gpu_ok and ram_ok:
+            status = "Хороший кандидат"
+        elif ram_ok:
+            status = "Возможно с выгрузкой части слоёв в RAM"
+        else:
+            status = "Память может быть ограничением"
+        result.append({**item, "status": status})
+    return result
+
+
+def show_recommendations():
+    console.print()
+    console.print(Panel(
+        "[bold cyan]AI HUB[/bold cyan]  [white]SMART MODEL ADVISOR[/white]\n"
+        "[dim]Анализ оборудования и совместимости локальных моделей[/dim]",
+        border_style="cyan",
+    ))
+
+    total_ram, available_ram = get_ram_gb()
+    gpus = get_gpu()
+
+    hardware = Table(title="ОБОРУДОВАНИЕ", border_style="cyan")
+    hardware.add_column("Компонент", style="bold")
+    hardware.add_column("Всего")
+    hardware.add_column("Сейчас свободно")
+
+    if total_ram is not None:
+        hardware.add_row(
+            "System RAM",
+            f"{total_ram:.1f} GiB",
+            f"{available_ram:.1f} GiB",
+        )
+    else:
+        hardware.add_row("System RAM", "Не удалось определить", "—")
+
+    if gpus:
+        for gpu in gpus:
+            hardware.add_row(
+                gpu["name"],
+                f"{gpu['total']:.1f} GiB VRAM",
+                f"{max(0, gpu['total'] - gpu['used']):.1f} GiB VRAM",
+            )
+    else:
+        hardware.add_row("NVIDIA GPU", "Не обнаружена через nvidia-smi", "—")
+
+    console.print(hardware)
+
+    models, error = get_ollama_models()
+    if error:
+        console.print(
+            f"\n[red]Ollama недоступна:[/red] {error}\n"
+            "[yellow]Запусти Ollama и повтори команду.[/yellow]"
+        )
+        return
+
+    installed = {model.get("name", "") for model in models}
+    console.print(f"\n[bold]Установлено моделей:[/bold] {len(installed)}")
+    for name in sorted(installed):
+        console.print(f"  [green]✓[/green] {name}")
+
+    free_vram = None
+    if gpus:
+        free_vram = max(0, gpus[0]["total"] - gpus[0]["used"])
+
+    recommendations = recommend_models(free_vram, available_ram)
+
+    table = Table(title="КАНДИДАТЫ ДЛЯ ТВОЕГО ПК", border_style="cyan")
+    table.add_column("Модель", style="bold")
+    table.add_column("Оценка VRAM", justify="right")
+    table.add_column("Рекомендация")
+    table.add_column("Назначение")
+
+    for item in recommendations:
+        if item["name"] in installed:
+            status = "[green]Уже установлена[/green]"
+        elif item["status"] == "Хороший кандидат":
+            status = "[green]Подходит по оценке[/green]"
+        elif item["status"].startswith("Возможно"):
+            status = "[yellow]Возможен запуск[/yellow]"
+        else:
+            status = "[red]Есть ограничения[/red]"
+
+        table.add_row(
+            item["name"],
+            f"≈ {item['vram']:.0f} GiB",
+            status,
+            item["use"],
+        )
+
+    console.print()
+    console.print(table)
+    console.print(
+        "\n[dim]Оценки приблизительные: фактическая память зависит от "
+        "квантования, размера контекста, Ollama и других приложений. "
+        "Свободная VRAM измеряется в момент проверки. Перед загрузкой "
+        "проверь размер модели и доступное место на диске.[/dim]"
+    )
+    console.print(
+        "\n[bold cyan]Установка:[/bold cyan] "
+        "[white]aihub models-install ИМЯ_МОДЕЛИ[/white]"
+    )

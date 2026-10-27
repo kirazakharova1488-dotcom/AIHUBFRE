@@ -1,0 +1,57 @@
+"""Agent manager: CRUD for agents backed by SQLite."""
+
+from __future__ import annotations
+
+import sqlite3
+import uuid
+
+from ai_hub.agents.models import AgentConfig
+from ai_hub.storage.database import get_connection
+from ai_hub.storage.repositories import AgentRepository
+
+
+class AgentManager:
+    def __init__(self, connection: sqlite3.Connection | None = None) -> None:
+        self.conn = connection or get_connection()
+        self.repo = AgentRepository(self.conn)
+
+    def create(self, name: str, description: str = "", system_prompt: str | None = None,
+               model: str | None = None, token_limit: int | None = None, max_steps: int = 5,
+               permissions: list[str] | None = None, tools: list[str] | None = None) -> AgentConfig:
+        agent_id = f"agent_{uuid.uuid4().hex[:8]}"
+        if system_prompt is None:
+            system_prompt = f"You are {name}, a helpful AI assistant."
+        self.repo.create(
+            agent_id=agent_id, name=name, description=description, system_prompt=system_prompt,
+            model=model, permissions=",".join(permissions or []),
+            token_limit=token_limit, max_steps=max_steps,
+        )
+        return AgentConfig(
+            agent_id=agent_id, name=name, description=description, system_prompt=system_prompt,
+            model=model, tools=tools or [], permissions=permissions or [],
+            token_limit=token_limit, max_steps=max_steps,
+        )
+
+    def get(self, agent_id: str) -> AgentConfig | None:
+        row = self.repo.get(agent_id)
+        if row is None:
+            return None
+        return AgentConfig(
+            agent_id=row["id"], name=row["name"], description=row["description"] or "",
+            system_prompt=row["system_prompt"] or "", model=row["model"],
+            tools=row["tools"].split(",") if "tools" in row.keys() and row["tools"] else [],
+            permissions=row["permissions"].split(",") if row["permissions"] else [],
+            token_limit=row["token_limit"], max_steps=row["max_steps"], version=row["version"] if "version" in row.keys() else 1,
+        )
+
+    def by_name(self, name: str) -> AgentConfig | None:
+        row = self.repo.by_name(name)
+        if row is None:
+            return None
+        return self.get(row["id"])
+
+    def list(self) -> list[AgentConfig]:
+        return [self.get(row["id"]) for row in self.repo.list() if self.get(row["id"])]
+
+    def delete(self, agent_id: str) -> bool:
+        return self.repo.delete(agent_id)
