@@ -33,3 +33,14 @@ Thumbs.db
 .vscode/
 .idea/
 *.swp
+
+# AI HUB local workspace and backups
+workspace/
+*.bak
+*.backup
+test_ollama_tools.py
+
+# Android Web build and dependencies
+android-web/node_modules/
+android-web/dist/
+android-web/.vite/

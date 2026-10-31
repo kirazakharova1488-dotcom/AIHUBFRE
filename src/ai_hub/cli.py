@@ -5,9 +5,9 @@ from __future__ import annotations
 
 import asyncio
 import shlex
+import sqlite3
 import time
 from pathlib import Path
-import sqlite3
 
 import typer
 from rich.align import Align
@@ -21,13 +21,16 @@ from ai_hub.agents.runtime import AgentRuntime
 from ai_hub.config import get_db_path, get_data_dir, settings
 from ai_hub.core.orchestrator import ChatResult, Orchestrator
 from ai_hub.extensions.manager import ExtensionManager
-from ai_hub.providers.registry import build_registry
 from ai_hub.model_manager import (
     delete_model as _delete_local_model,
     format_bytes as _format_model_bytes,
     list_models as _list_local_models,
     pull_model as _pull_local_model,
 )
+from ai_hub.models_recommend import (
+    show_recommendations as _show_model_recommendations,
+)
+from ai_hub.providers.registry import build_registry
 from ai_hub.storage.database import get_connection, migrate
 from ai_hub.storage.repositories import (
     ConversationRepository,
@@ -91,13 +94,17 @@ def _show_logo() -> None:
      █████╗ ██╗    ██╗    ██╗  ██╗██╗   ██╗██████╗
     ██╔══██╗██║    ██║    ██║  ██║██║   ██║██╔══██╗
     ███████║██║ █╗ ██║    ███████║██║   ██║██████╔╝
-    ██╔══██║██║███╗██║    ██╔══██║██║   ██║██╔══██╗
+    ██╔══██║██║███╗██║    ██║  ██║██║   ██║██╔══██╗
     ██║  ██║╚███╔███╔╝    ██║  ██║╚██████╔╝██████╔╝
     ╚═╝  ╚═╝ ╚══╝╚══╝     ╚═╝  ╚═╝ ╚═════╝ ╚═════╝
     """
+
     brand = Text(logo, style="bold bright_cyan")
     brand.append("\nUNIVERSAL AI & AGENT PLATFORM", style="bold white")
-    brand.append("\nLOCAL INTELLIGENCE  •  MULTI-MODEL", style="dim cyan")
+    brand.append(
+        "\nLOCAL INTELLIGENCE  •  MULTI-MODEL  •  AI AGENTS",
+        style="dim cyan",
+    )
 
     console.print()
     console.print(
@@ -105,7 +112,7 @@ def _show_logo() -> None:
             Align.center(brand),
             title="[bold bright_cyan]AI HUB[/bold bright_cyan]",
             subtitle=f"[dim]TERMINAL EDITION v{__version__}[/dim]",
-            border_style="white",
+            border_style="bright_cyan",
             padding=(1, 2),
             expand=False,
         ),
@@ -114,7 +121,7 @@ def _show_logo() -> None:
 
 
 def _startup_screen():
-    """Initialize services and show a real animated startup indicator."""
+    """Initialize services and display startup information."""
     registry = _get_registry()
     orchestrator = _get_orchestrator()
     extensions = _get_extensions()
@@ -131,8 +138,12 @@ def _startup_screen():
         extension_repo = ExtensionRepository(get_connection())
         extension_count = len(extension_repo.list())
 
-    online_count = sum(1 for health in healths.values() if health.online)
-    model_count = sum(len(health.models or []) for health in healths.values())
+    online_count = sum(
+        1 for health in healths.values() if health.online
+    )
+    model_count = sum(
+        len(health.models or []) for health in healths.values()
+    )
 
     console.print(
         Panel(
@@ -143,6 +154,7 @@ def _startup_screen():
             expand=False,
         )
     )
+
     status_bar(
         model_count,
         online_count,
@@ -150,6 +162,7 @@ def _startup_screen():
         extension_count,
         mode="LOCAL / FREE",
     )
+
     return registry, orchestrator, extensions, agents
 
 
@@ -162,6 +175,7 @@ def _run_interactive(
     agent: str | None = None,
 ) -> None:
     """Launch the AI HUB terminal chat."""
+
     _init_db()
     console.clear()
     _show_logo()
@@ -175,7 +189,10 @@ def _run_interactive(
     conn = get_connection()
     conv_repo = ConversationRepository(conn)
     usage_repo = UsageRepository(conn)
-    conv_id = conv_repo.create(title=f"chat-{int(time.time())}")
+
+    conv_id = conv_repo.create(
+        title=f"chat-{int(time.time())}"
+    )
 
     console.print(
         "\n[dim]Commands:[/dim] "
@@ -191,18 +208,27 @@ def _run_interactive(
     while True:
         try:
             user_input = prompt()
+
         except (EOFError, KeyboardInterrupt):
-            console.print("\n[bold green]AI HUB stopped. Goodbye![/bold green]")
+            console.print(
+                "\n[bold green]AI HUB stopped. Goodbye![/bold green]"
+            )
             break
 
-        user_input = user_input.strip()
-        if not user_input:
+        # Preserve the original message, including whitespace and newlines.
+        if not user_input.strip():
             continue
 
+        # Normalize commands separately from the original message.
+        command_text = user_input.strip()
+
+        # -------------------------------------------------------------------
         # Slash commands
-        if user_input.startswith("/"):
+        # -------------------------------------------------------------------
+
+        if command_text.startswith("/"):
             try:
-                parts = shlex.split(user_input)
+                parts = shlex.split(command_text)
             except ValueError as exc:
                 warn(f"Invalid command syntax: {exc}")
                 continue
@@ -213,26 +239,38 @@ def _run_interactive(
             cmd, args = parts[0].lower(), parts[1:]
 
             if cmd in ("/exit", "/quit"):
-                console.print("[bold green]AI HUB stopped. Goodbye![/bold green]")
+                console.print(
+                    "[bold green]AI HUB stopped. Goodbye![/bold green]"
+                )
                 break
+
             elif cmd == "/help":
                 _print_help()
+
             elif cmd == "/models":
                 _cmd_models_list()
+
             elif cmd == "/providers":
                 _cmd_providers_list()
+
             elif cmd == "/agents":
                 _cmd_agents_list()
+
             elif cmd == "/extensions":
                 _cmd_extensions_list()
+
             elif cmd == "/settings":
                 _cmd_settings()
+
             elif cmd == "/limits":
                 _cmd_limits_show()
+
             elif cmd == "/usage":
                 _cmd_usage()
+
             elif cmd == "/history":
                 history = conv_repo.history(conv_id)
+
                 rows = [
                     [
                         item["role"],
@@ -241,33 +279,43 @@ def _run_interactive(
                     ]
                     for item in history
                 ]
+
                 table(
                     rows,
                     ["role", "content", "model"],
                     title="Conversation History",
                 )
+
             elif cmd == "/clear":
                 console.clear()
                 _show_logo()
                 console.print(
                     "[dim]Type /help for commands or /exit to quit.[/dim]\n"
                 )
+
             elif cmd == "/reset":
                 conv_id = conv_repo.create(
                     title=f"chat-{int(time.time())}"
                 )
                 ok("Started a new conversation.")
+
             elif cmd == "/use" and args:
                 active_model = args[0]
                 ok(f"Model override set to {active_model}")
+
             elif cmd == "/agent" and args:
                 active_agent = args[0]
                 ok(f"Agent set to {active_agent}")
+
             else:
                 warn(f"Unknown command: {cmd}. Type /help.")
+
             continue
 
-        # Save user message
+        # -------------------------------------------------------------------
+        # Save original user message
+        # -------------------------------------------------------------------
+
         conv_repo.add_message(
             conv_id,
             "user",
@@ -275,8 +323,12 @@ def _run_interactive(
             model=active_model,
         )
 
+        # -------------------------------------------------------------------
         # Handle supported natural-language actions
+        # -------------------------------------------------------------------
+
         intent = _detect_intent(user_input)
+
         if intent:
             response_text = _handle_intent(
                 intent,
@@ -284,6 +336,7 @@ def _run_interactive(
                 extensions,
                 agents,
             )
+
             console.print(
                 Panel(
                     response_text,
@@ -292,15 +345,20 @@ def _run_interactive(
                     expand=False,
                 )
             )
+
             conv_repo.add_message(
                 conv_id,
                 "assistant",
                 response_text,
                 model="system",
             )
+
             continue
 
-        # Run the model with a spinner
+        # -------------------------------------------------------------------
+        # Run model or agent
+        # -------------------------------------------------------------------
+
         with console.status(
             "[bold bright_cyan]➤ AI HUB THINKING[/bold bright_cyan]\n"
             "[dim]Generating response...[/dim]",
@@ -309,24 +367,35 @@ def _run_interactive(
         ):
             try:
                 if active_agent:
-                    agent_config = None
-                    for cfg in agents.list():
-                        if cfg.name == active_agent:
-                            agent_config = cfg
-                            break
-                    # ?????? ?? ?????? ??????? ? ?????????? ????? (????) ? Windows
-                    if not agent_config and agents.list():
-                        agent_config = agents.list()[0]
-                    if agent_config:
-                        runtime = AgentRuntime(manager=agents, orchestrator=orchestrator)
-                        run_result = asyncio.run(runtime.run(agent_config, user_input))
-                        result = ChatResult(
-                            text=run_result.final_text,
-                            model=agent_config.model,
-                            provider="AgentRuntime",
+                    agent_config = next(
+                        (
+                            cfg
+                            for cfg in agents.list()
+                            if cfg.name == active_agent
+                        ),
+                        None,
+                    )
+
+                    if not agent_config:
+                        raise ValueError(
+                            f"Agent '{active_agent}' not found."
                         )
-                    else:
-                        raise ValueError(f"Agent '{active_agent}' not found configuration.")
+
+                    runtime = AgentRuntime(
+                        manager=agents,
+                        orchestrator=orchestrator,
+                    )
+
+                    run_result = asyncio.run(
+                        runtime.run(agent_config, user_input)
+                    )
+
+                    result = ChatResult(
+                        text=run_result.final_text,
+                        model=agent_config.model,
+                        provider="AgentRuntime",
+                    )
+
                 else:
                     result = asyncio.run(
                         orchestrator.process(
@@ -335,17 +404,23 @@ def _run_interactive(
                             model_override=active_model,
                         )
                     )
-            except Exception as exc:  # noqa: BLE001
+
+            except Exception as exc:
                 result = ChatResult(
                     text=f"Request failed: {exc}",
                     model=active_model or "-",
                     provider="-",
                 )
 
+        # -------------------------------------------------------------------
+        # Display response
+        # -------------------------------------------------------------------
+
         console.print(
             f"[dim]Provider:[/dim] [cyan]{result.provider}[/cyan]  "
             f"[dim]Model:[/dim] [bright_cyan]{result.model}[/bright_cyan]"
         )
+
         console.print(
             Panel(
                 Markdown(result.text),
@@ -369,7 +444,7 @@ def _run_interactive(
                 0,
                 0,
             )
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
 
 
@@ -379,6 +454,7 @@ def _run_interactive(
 
 def _print_help() -> None:
     header("Commands", "AI HUB CLI")
+
     table(
         [
             ["/help", "show this help"],
@@ -407,6 +483,7 @@ def _cmd_models_list() -> None:
         return await registry.health_all()
 
     healths = asyncio.run(run_health())
+
     rows = [
         [
             name,
@@ -417,6 +494,7 @@ def _cmd_models_list() -> None:
         ]
         for name, health in healths.items()
     ]
+
     table(
         rows,
         ["provider", "display name", "status", "models", "details"],
@@ -430,6 +508,7 @@ def _cmd_providers_list() -> None:
 
 def _cmd_agents_list() -> None:
     manager = _get_agents()
+
     rows = [
         [
             item.name,
@@ -439,6 +518,7 @@ def _cmd_agents_list() -> None:
         ]
         for item in manager.list()
     ]
+
     table(
         rows,
         ["name", "model", "token limit", "max steps"],
@@ -448,6 +528,7 @@ def _cmd_agents_list() -> None:
 
 def _cmd_extensions_list() -> None:
     manager = _get_extensions()
+
     rows = [
         [
             item["id"],
@@ -458,6 +539,7 @@ def _cmd_extensions_list() -> None:
         ]
         for item in manager.list()
     ]
+
     table(
         rows,
         ["id", "name", "type", "version", "enabled"],
@@ -474,6 +556,7 @@ def _cmd_limits_show() -> None:
         f"[dim]Output token limit:[/dim] "
         f"[bright_cyan]{settings.default_output_token_limit}[/bright_cyan]"
     )
+
     console.print(
         f"[dim]Context token limit:[/dim] "
         f"[bright_cyan]{settings.default_context_token_limit}[/bright_cyan]"
@@ -484,6 +567,7 @@ def _cmd_usage() -> None:
     conn = _get_db()
     repo = UsageRepository(conn)
     totals = repo.totals()
+
     table(
         [[
             str(totals["in"]),
@@ -502,6 +586,7 @@ def _cmd_usage() -> None:
 @app.command(name="models-local")
 def models_local() -> None:
     """List locally installed Ollama models and their sizes."""
+
     try:
         items = _list_local_models()
     except RuntimeError as exc:
@@ -509,7 +594,10 @@ def models_local() -> None:
         raise typer.Exit(code=1) from exc
 
     if not items:
-        info("No local models installed. Install one with: aihub models-install qwen2.5:7b")
+        info(
+            "No local models installed. "
+            "Install one with: aihub models-install qwen2.5:7b"
+        )
         return
 
     rows = [
@@ -520,14 +608,23 @@ def models_local() -> None:
         ]
         for item in items
     ]
-    table(rows, ["MODEL", "SIZE", "LAST MODIFIED"], title="LOCAL MODEL LIBRARY")
+
+    table(
+        rows,
+        ["MODEL", "SIZE", "LAST MODIFIED"],
+        title="LOCAL MODEL LIBRARY",
+    )
 
 
 @app.command(name="models-install")
 def models_install(
-    model: str = typer.Argument(..., help="Ollama model name, e.g. qwen2.5:7b"),
+    model: str = typer.Argument(
+        ...,
+        help="Ollama model name, e.g. qwen2.5:7b",
+    ),
 ) -> None:
     """Download a model from the Ollama library."""
+
     try:
         _pull_local_model(model)
     except (RuntimeError, ValueError) as exc:
@@ -537,10 +634,19 @@ def models_install(
 
 @app.command(name="models-remove")
 def models_remove(
-    model: str = typer.Argument(..., help="Name of the installed model"),
-    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt"),
+    model: str = typer.Argument(
+        ...,
+        help="Name of the installed model",
+    ),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Skip the confirmation prompt",
+    ),
 ) -> None:
     """Remove an installed local model."""
+
     try:
         installed = _list_local_models()
     except RuntimeError as exc:
@@ -548,9 +654,14 @@ def models_remove(
         raise typer.Exit(code=1) from exc
 
     match = next(
-        (item for item in installed if item.get("name") == model),
+        (
+            item
+            for item in installed
+            if item.get("name") == model
+        ),
         None,
     )
+
     if match is None:
         error(f"Model not found: {model}")
         raise typer.Exit(code=1)
@@ -609,13 +720,17 @@ def usage() -> None:
 @app.command(name="settings")
 def settings_cmd() -> None:
     """Show current settings."""
+
     rows = [
         ["ollama_host", settings.ollama_host],
         ["ollama_timeout", str(settings.ollama_timeout)],
         ["openai_base_url", settings.openai_base_url or "-"],
         ["gemini_api_key", "***" if settings.gemini_api_key else "-"],
         ["groq_api_key", "***" if settings.groq_api_key else "-"],
-        ["openrouter_api_key", "***" if settings.openrouter_api_key else "-"],
+        [
+            "openrouter_api_key",
+            "***" if settings.openrouter_api_key else "-",
+        ],
         [
             "default_output_token_limit",
             str(settings.default_output_token_limit),
@@ -625,17 +740,27 @@ def settings_cmd() -> None:
             str(settings.default_context_token_limit),
         ],
         ["sandbox_enabled", str(settings.sandbox_enabled)],
-        ["network_access_allowed", str(settings.network_access_allowed)],
+        [
+            "network_access_allowed",
+            str(settings.network_access_allowed),
+        ],
     ]
-    table(rows, ["setting", "value"], title="AI HUB Settings")
+
+    table(
+        rows,
+        ["setting", "value"],
+        title="AI HUB Settings",
+    )
 
 
 @app.command(name="history")
 def history_cmd() -> None:
     """List saved conversations."""
+
     conn = _get_db()
     repo = ConversationRepository(conn)
     conversations = repo.list_conversations()
+
     rows = [
         [
             str(item["id"]),
@@ -644,6 +769,7 @@ def history_cmd() -> None:
         ]
         for item in conversations
     ]
+
     table(
         rows,
         ["id", "title", "updated"],
@@ -660,11 +786,16 @@ def memory_cmd() -> None:
 @app.command(name="backup")
 def backup_cmd() -> None:
     """Create a database backup."""
+
     db_path = get_db_path()
-    backup_path = get_data_dir() / f"ai_hub_backup_{int(time.time())}.db"
+    backup_path = (
+        get_data_dir()
+        / f"ai_hub_backup_{int(time.time())}.db"
+    )
 
     source = sqlite3.connect(str(db_path))
     destination = sqlite3.connect(str(backup_path))
+
     try:
         source.backup(destination)
     finally:
@@ -676,9 +807,13 @@ def backup_cmd() -> None:
 
 @app.command(name="restore")
 def restore_cmd(
-    path: Path = typer.Argument(..., help="Path to a backup .db file"),
+    path: Path = typer.Argument(
+        ...,
+        help="Path to a backup .db file",
+    ),
 ) -> None:
     """Restore the database from a backup file."""
+
     if not path.is_file():
         error(f"Backup file not found: {path}")
         raise typer.Exit(code=1)
@@ -686,6 +821,7 @@ def restore_cmd(
     db_path = get_db_path()
     destination = sqlite3.connect(str(db_path))
     source = sqlite3.connect(str(path))
+
     try:
         source.backup(destination)
     finally:
@@ -711,7 +847,10 @@ def chat(
     ),
 ) -> None:
     """Start the interactive AI HUB chat."""
-    _run_interactive(model=model, agent=agent)
+    _run_interactive(
+        model=model,
+        agent=agent,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -723,9 +862,16 @@ def _detect_intent(user_input: str) -> dict | None:
 
     if any(
         phrase in text
-        for phrase in ("создай агента", "создать агента", "create agent")
+        for phrase in (
+            "создай агента",
+            "создать агента",
+            "create agent",
+        )
     ):
-        return {"type": "create_agent", "text": user_input}
+        return {
+            "type": "create_agent",
+            "text": user_input,
+        }
 
     if any(
         phrase in text
@@ -736,7 +882,10 @@ def _detect_intent(user_input: str) -> dict | None:
             "list agents",
         )
     ):
-        return {"type": "list_resources", "text": user_input}
+        return {
+            "type": "list_resources",
+            "text": user_input,
+        }
 
     if any(
         phrase in text
@@ -747,13 +896,25 @@ def _detect_intent(user_input: str) -> dict | None:
             "add extension",
         )
     ):
-        return {"type": "create_extension", "text": user_input}
+        return {
+            "type": "create_extension",
+            "text": user_input,
+        }
 
     if (
-        any(word in text for word in ("лимит", "limit", "токен", "token"))
-        and any(word in text for word in ("установи", "set", "задай"))
+        any(
+            word in text
+            for word in ("лимит", "limit", "токен", "token")
+        )
+        and any(
+            word in text
+            for word in ("установи", "set", "задай")
+        )
     ):
-        return {"type": "set_limit", "text": user_input}
+        return {
+            "type": "set_limit",
+            "text": user_input,
+        }
 
     return None
 
@@ -768,14 +929,20 @@ def _handle_intent(
 
     if kind == "create_agent":
         name = _guess_name(text) or "new-agent"
+
         try:
             config = agents.create(
                 name=name,
                 description="Created via chat",
                 model=None,
             )
-            return f"Created agent {config.name} ({config.agent_id})."
-        except Exception as exc:  # noqa: BLE001
+
+            return (
+                f"Created agent {config.name} "
+                f"({config.agent_id})."
+            )
+
+        except Exception as exc:
             return f"Could not create agent: {exc}"
 
     if kind == "create_extension":
@@ -801,18 +968,34 @@ def _handle_intent(
 
 def _guess_name(text: str) -> str | None:
     lowered = text.lower()
-    for marker in ("создай агента", "создать агента", "агента", "агент", "agent"):
+
+    markers = (
+        "создай агента",
+        "создать агента",
+        "агента",
+        "агент",
+        "agent",
+    )
+
+    for marker in markers:
         index = lowered.find(marker)
+
         if index >= 0:
-            remainder = text[index + len(marker):].strip(" ,.:-")
+            remainder = text[
+                index + len(marker):
+            ].strip(" ,.:-")
+
             words = remainder.split()
+
             if words:
                 return words[0]
+
     return None
 
 
-from ai_hub.models_recommend import show_recommendations as _show_model_recommendations
-
+# ---------------------------------------------------------------------------
+# Model recommendations
+# ---------------------------------------------------------------------------
 
 @app.command("models-recommend")
 def models_recommend() -> None:

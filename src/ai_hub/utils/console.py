@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from rich.align import Align
 from rich.box import ROUNDED
 from rich.console import Console, Group
@@ -12,6 +14,10 @@ from rich.spinner import Spinner
 from rich.table import Table
 from rich.text import Text
 from rich.theme import Theme
+
+from prompt_toolkit import PromptSession
+from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.styles import Style
 
 
 # ---------------------------------------------------------
@@ -35,7 +41,123 @@ _ai_hub_theme = Theme(
     }
 )
 
-console = Console(theme=_ai_hub_theme)
+console = Console(
+    theme=_ai_hub_theme,
+    highlight=False,
+)
+
+
+# ---------------------------------------------------------
+# Multiline prompt editor
+# ---------------------------------------------------------
+
+_input_bindings = KeyBindings()
+
+# Интервал ожидания второго Enter.
+_DOUBLE_ENTER_DELAY = 0.4
+
+# Задача отложенной отправки.
+_enter_state = {
+    "task": None,
+}
+
+
+async def _submit_after_delay(app, buffer) -> None:
+    """Submit the message if a second Enter was not pressed."""
+    try:
+        await asyncio.sleep(_DOUBLE_ENTER_DELAY)
+
+        _enter_state["task"] = None
+
+        if app.is_running:
+            buffer.validate_and_handle()
+
+    except asyncio.CancelledError:
+        pass
+
+
+@_input_bindings.add("enter", eager=True)
+def _handle_enter(event) -> None:
+    """
+    Enter behavior:
+
+    First Enter  - submit after a short delay.
+    Second Enter - insert a newline instead.
+    """
+
+    pending_task = _enter_state["task"]
+
+    if pending_task is not None and not pending_task.done():
+        # Второй Enter отменяет отправку и создаёт новую строку.
+        pending_task.cancel()
+        _enter_state["task"] = None
+
+        event.current_buffer.insert_text("\n")
+        return
+
+    # Первый Enter: ждём возможное второе нажатие.
+    _enter_state["task"] = event.app.create_background_task(
+        _submit_after_delay(
+            event.app,
+            event.current_buffer,
+        )
+    )
+
+
+_input_style = Style.from_dict(
+    {
+        "prompt": "bold ansicyan",
+        "prompt-text": "bold #ffffff",
+        "bottom-toolbar": "bg:#172333 #8aa0b8",
+    }
+)
+
+_prompt_session: PromptSession | None = None
+
+
+def _get_prompt_session() -> PromptSession:
+    """Create the input session once and reuse it."""
+    global _prompt_session
+
+    if _prompt_session is None:
+        _prompt_session = PromptSession(
+            multiline=True,
+            key_bindings=_input_bindings,
+            style=_input_style,
+            enable_history_search=True,
+            complete_while_typing=False,
+        )
+
+    return _prompt_session
+
+
+def prompt(text: str = "> ") -> str:
+    """
+    Read a multiline message.
+
+    Enter:
+        Submit after a short delay.
+
+    Enter twice:
+        Insert a newline.
+    """
+
+    session = _get_prompt_session()
+
+    _enter_state["task"] = None
+
+    return session.prompt(
+        [
+            ("class:prompt", "❯ "),
+            ("class:prompt-text", text),
+        ],
+        bottom_toolbar=(
+            " Enter: отправить  |  "
+            " Enter x2: новая строка  |  "
+            " Ctrl+C: отменить "
+        ),
+        prompt_continuation=lambda width, line_number, is_soft_wrap: "    ",
+    )
 
 
 # ---------------------------------------------------------
@@ -46,7 +168,7 @@ _LOGO = r"""
      █████╗ ██╗    ██╗    ██╗  ██╗██╗   ██╗██████╗
     ██╔══██╗██║    ██║    ██║  ██║██║   ██║██╔══██╗
     ███████║██║ █╗ ██║    ███████║██║   ██║██████╔╝
-    ██╔══██╗██║███╗██║    ██║  ██║██║   ██║██╔══██╗
+    ██╔══██║██║███╗██║    ██║  ██║██║   ██║██╔══██╗
     ██║  ██║╚███╔███╔╝    ██║  ██║╚██████╔╝██████╔╝
     ╚═╝  ╚═╝ ╚══╝╚══╝     ╚═╝  ╚═╝ ╚═════╝ ╚═════╝
 """
@@ -57,15 +179,24 @@ def header(
     subtitle: str = "Universal AI & Agent Platform",
 ) -> None:
     """Display the main AI HUB banner."""
+
     content = Group(
-        Align.center(Text(_LOGO.strip("\n"), style="bold bright_cyan")),
-        Align.center(Text(subtitle, style="bold white")),
         Align.center(
-            Text("LOCAL INTELLIGENCE  •  MULTI-MODEL", style="dim cyan")
+            Text(_LOGO.strip("\n"), style="bold bright_cyan")
+        ),
+        Align.center(
+            Text(subtitle, style="bold white")
+        ),
+        Align.center(
+            Text(
+                "LOCAL INTELLIGENCE  •  MULTI-MODEL  •  AI AGENTS",
+                style="dim cyan",
+            )
         ),
     )
 
     console.print()
+
     console.print(
         Panel(
             content,
@@ -91,15 +222,35 @@ def status_bar(
     mode: str = "FREE",
 ) -> None:
     """Display a compact system status dashboard."""
+
     grid = Table.grid(padding=(0, 2))
     grid.add_column()
     grid.add_column(justify="right")
 
-    grid.add_row("[muted]LOCAL MODELS[/muted]", f"[model]{models}[/model]")
-    grid.add_row("[muted]ONLINE PROVIDERS[/muted]", f"[status_online]{online}[/status_online]")
-    grid.add_row("[muted]AI AGENTS[/muted]", f"[agent]{agents}[/agent]")
-    grid.add_row("[muted]EXTENSIONS[/muted]", f"[extension]{extensions}[/extension]")
-    grid.add_row("[muted]EXECUTION MODE[/muted]", f"[success]{mode}[/success]")
+    grid.add_row(
+        "[muted]LOCAL MODELS[/muted]",
+        f"[model]{models}[/model]",
+    )
+
+    grid.add_row(
+        "[muted]ONLINE PROVIDERS[/muted]",
+        f"[status_online]{online}[/status_online]",
+    )
+
+    grid.add_row(
+        "[muted]AI AGENTS[/muted]",
+        f"[agent]{agents}[/agent]",
+    )
+
+    grid.add_row(
+        "[muted]EXTENSIONS[/muted]",
+        f"[extension]{extensions}[/extension]",
+    )
+
+    grid.add_row(
+        "[muted]EXECUTION MODE[/muted]",
+        f"[success]{mode}[/success]",
+    )
 
     console.print(
         Panel(
@@ -123,24 +274,21 @@ def info(text: str) -> None:
 
 
 def ok(text: str) -> None:
-    console.print(f"[success]✔[/success] {text}")
+    console.print(
+        f"[success]✔[/success] {text}"
+    )
 
 
 def warn(text: str) -> None:
-    console.print(f"[warning]⚠[/warning] {text}")
+    console.print(
+        f"[warning]⚠[/warning] {text}"
+    )
 
 
 def error(text: str) -> None:
-    console.print(f"[error]✖ ERROR[/error]  {text}")
-
-
-# ---------------------------------------------------------
-# Interactive input
-# ---------------------------------------------------------
-
-def prompt(text: str = "> ") -> str:
-    """Read user input using the shared AI HUB theme."""
-    return console.input(f"[primary]❯[/primary] [bold white]{text}[/bold white]")
+    console.print(
+        f"[error]✖ ERROR[/error]  {text}"
+    )
 
 
 # ---------------------------------------------------------
@@ -153,6 +301,7 @@ def table(
     title: str | None = None,
 ) -> None:
     """Print a consistently styled table."""
+
     result = Table(
         title=title,
         title_style="bold bright_cyan",
@@ -164,10 +313,16 @@ def table(
     )
 
     for column in columns:
-        result.add_column(column, style="secondary", overflow="fold")
+        result.add_column(
+            column,
+            style="secondary",
+            overflow="fold",
+        )
 
     for row in rows:
-        result.add_row(*(str(cell) for cell in row))
+        result.add_row(
+            *(str(cell) for cell in row)
+        )
 
     console.print(result)
 
@@ -177,16 +332,14 @@ def table(
 # ---------------------------------------------------------
 
 def loading(text: str = "LOADING AI HUB...") -> Live:
-    """Create an animated loading indicator.
+    """Create an animated loading indicator."""
 
-    Use with a context manager:
-
-        with loading("Checking AI providers..."):
-            perform_check()
-    """
     spinner = Spinner(
         "dots",
-        text=Text(f" {text}", style="bold bright_cyan"),
+        text=Text(
+            f" {text}",
+            style="bold bright_cyan",
+        ),
         style="bright_cyan",
     )
 
